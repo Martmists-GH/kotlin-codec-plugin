@@ -122,7 +122,6 @@ class CodecFIRGenerator(session: FirSession) : FirDeclarationGenerationExtension
             ?: return emptyList()
         if (!owner.isCompanion || !outer.hasAnnotation(recordAnnotationId, session)) return emptyList()
 
-        // Resolve Codec type
         val codecClass = session.symbolProvider.getClassLikeSymbolByClassId(
             ClassId(FqName("com.mojang.serialization"), Name.identifier("Codec"))
         ) ?: return emptyList()

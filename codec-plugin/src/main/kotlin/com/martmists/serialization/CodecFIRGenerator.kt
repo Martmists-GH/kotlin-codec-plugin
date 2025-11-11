@@ -29,11 +29,9 @@ import org.jetbrains.kotlin.name.*
 
 @OptIn(SymbolInternals::class, DirectDeclarationsAccess::class)
 class CodecFIRGenerator(session: FirSession) : FirDeclarationGenerationExtension(session) {
-    private object GeneratedForCodec : GeneratedDeclarationKey()
-
     private val recordAnnotationId = ClassId(
         FqName("com.martmists.serialization"),
-        Name.identifier("Codec")
+        Name.identifier("Record")
     )
 
     override fun getCallableNamesForClass(
@@ -55,7 +53,7 @@ class CodecFIRGenerator(session: FirSession) : FirDeclarationGenerationExtension
         context: NestedClassGenerationContext
     ): Set<Name> {
         if (classSymbol.annotations.isEmpty()) return emptySet()
-        return if (classSymbol.annotations.filterIsInstance<FirAnnotationCall>().any { (it.calleeReference as? FirSimpleNamedReference)?.name?.asString() == "Codec" }) {
+        return if (classSymbol.annotations.filterIsInstance<FirAnnotationCall>().any { (it.calleeReference as? FirSimpleNamedReference)?.name?.asString() == "Record" }) {
             setOf(Name.identifier("Companion"))
         } else {
             emptySet()
@@ -67,13 +65,13 @@ class CodecFIRGenerator(session: FirSession) : FirDeclarationGenerationExtension
         name: Name,
         context: NestedClassGenerationContext
     ): FirClassLikeSymbol<*>? {
-        if (!owner.annotations.filterIsInstance<FirAnnotationCall>().any { (it.calleeReference as? FirSimpleNamedReference)?.name?.asString() == "Codec" }) return null
+        if (!owner.annotations.filterIsInstance<FirAnnotationCall>().any { (it.calleeReference as? FirSimpleNamedReference)?.name?.asString() == "Record" }) return null
         if (name.asString() != "Companion") return null
 
         val existing = owner.fir.declarations.filterIsInstance<FirRegularClass>().firstOrNull { it.isCompanion }
         if (existing != null) return null
 
-        val companion = createCompanionObject(owner, GeneratedForCodec)
+        val companion = createCompanionObject(owner, CodecGenerationKey)
         return companion.symbol
     }
 
@@ -85,7 +83,7 @@ class CodecFIRGenerator(session: FirSession) : FirDeclarationGenerationExtension
             !outer.hasAnnotation(recordAnnotationId, session)
         ) return emptyList()
 
-        val ctor = createDefaultPrivateConstructor(owner, GeneratedForCodec)
+        val ctor = createDefaultPrivateConstructor(owner, CodecGenerationKey)
         return listOf(ctor.symbol)
     }
 
@@ -104,11 +102,12 @@ class CodecFIRGenerator(session: FirSession) : FirDeclarationGenerationExtension
         val codecClass = session.symbolProvider.getClassLikeSymbolByClassId(
             ClassId(FqName("com.mojang.serialization"), Name.identifier("Codec"))
         ) ?: return emptyList()
+
         val codecType = codecClass.constructType(arrayOf(outer.defaultType()))
 
         val prop = createMemberProperty(
             owner,
-            GeneratedForCodec,
+            CodecGenerationKey,
             Name.identifier("CODEC"),
             codecType,
         )

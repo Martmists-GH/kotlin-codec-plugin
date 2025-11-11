@@ -17,6 +17,7 @@ import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionExpressionImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionReferenceImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrPropertyReferenceImpl
+import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
 import org.jetbrains.kotlin.ir.types.*
@@ -113,77 +114,38 @@ class CodecIRGenerator : IrGenerationExtension {
         )!!
 
         return when {
-            type == pluginContext.irBuiltIns.intType -> {
-                irGetField(
-                    null,
-                    codecKlass.owner.declarations.filterIsInstance<IrProperty>()
-                        .first { it.name.asString() == "INT" }.backingField!!
-                )
-            }
-            type == pluginContext.irBuiltIns.longType -> {
-                irGetField(
-                    null,
-                    codecKlass.owner.declarations.filterIsInstance<IrProperty>()
-                        .first { it.name.asString() == "LONG" }.backingField!!
-                )
-            }
-            type == pluginContext.irBuiltIns.floatType -> {
-                irGetField(
-                    null,
-                    codecKlass.owner.declarations.filterIsInstance<IrProperty>()
-                        .first { it.name.asString() == "FLOAT" }.backingField!!
-                )
-            }
-            type == pluginContext.irBuiltIns.doubleType -> {
-                irGetField(
-                    null,
-                    codecKlass.owner.declarations.filterIsInstance<IrProperty>()
-                        .first { it.name.asString() == "DOUBLE" }.backingField!!
-                )
-            }
-            type == pluginContext.irBuiltIns.booleanType -> {
-                irGetField(
-                    null,
-                    codecKlass.owner.declarations.filterIsInstance<IrProperty>()
-                        .first { it.name.asString() == "BOOLEAN" }.backingField!!
-                )
-            }
-            type == pluginContext.irBuiltIns.stringType -> {
-                irGetField(
-                    null,
-                    codecKlass.owner.declarations.filterIsInstance<IrProperty>()
-                        .first { it.name.asString() == "STRING" }.backingField!!
-                )
-            }
+            type == pluginContext.irBuiltIns.intType -> irGetStaticCodec(codecKlass, "INT")
+            type == pluginContext.irBuiltIns.floatType -> irGetStaticCodec(codecKlass, "FLOAT")
+            type == pluginContext.irBuiltIns.booleanType -> irGetStaticCodec(codecKlass, "BOOLEAN")
+            type == pluginContext.irBuiltIns.stringType -> irGetStaticCodec(codecKlass, "STRING")
 
             type.classOrNull == pluginContext.irBuiltIns.listClass -> {
-                val nestedType = (type as IrSimpleType).arguments.first().typeOrFail
-                val nested = getCodec(pluginContext, nestedType)
-                irCall(codecKlass.owner.functions.first { it.name.asString() == "list" }).apply {
-                    arguments[0] = nested
+                val elementType = (type as IrSimpleType).arguments.first().typeOrFail
+                val elementCodec = getCodec(pluginContext, elementType)
+                irCall(codecKlass.owner.functions.first { it.name.asString() == "list" && it.parameters.size == 1 }).apply {
+                    arguments[0] = elementCodec
                 }
             }
 
             else -> {
                 val typeSymbol = type.classOrNull ?: error("Type has no class: $type")
-                val codecProperty = (typeSymbol.owner.companionObject() ?: typeSymbol.owner).declarations
-                    .filterIsInstance<IrProperty>()
-                    .firstOrNull { it.name.asString() == "CODEC" }
-                    ?: error("Type ${typeSymbol.owner.name} does not have a CODEC property")
+                val companion = typeSymbol.owner.companionObject()
+                val codecField = (companion ?: typeSymbol.owner).declarations.filterIsInstance<IrProperty>().firstOrNull { it.name.asString() == "CODEC" }?.backingField
+                ?: error("Type ${typeSymbol.owner.name} does not have a CODEC property")
 
-                val field = codecProperty.backingField
-                    ?: error("CODEC field not found for type $type")
+                val receiver = if (companion != null) irGetObjectValue(companion.defaultType, companion.symbol) else null
 
-                val dispatchReceiver = codecProperty.parent as? IrClass
-                val receiverExpression = if (dispatchReceiver?.isCompanion == true) {
-                    irGetObjectValue(dispatchReceiver.defaultType, dispatchReceiver.symbol)
-                } else {
-                    null
-                }
-
-                irGetField(receiverExpression, field)
+                irGetField(receiver, codecField)
             }
         }
+    }
+
+    private fun IrBuilder.irGetStaticCodec(codecKlass: IrClassSymbol, fieldName: String): IrExpression {
+        val field = codecKlass.owner.declarations
+            .filterIsInstance<IrProperty>()
+            .first { it.name.asString() == fieldName }
+            .backingField!!
+        return irGetField(null, field)
     }
 
     private fun initializeCodecField(

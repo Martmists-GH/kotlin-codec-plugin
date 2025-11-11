@@ -1,0 +1,10 @@
+### IDE
+.idea/
+
+### Gradle
+.kotlin/
+.gradle/
+build/
+
+### Minecraft
+run/

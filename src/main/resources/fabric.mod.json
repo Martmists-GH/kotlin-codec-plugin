@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "serialization-record",
+  "version": "${version}",
+  "name": "serialization-record",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "BSD-3-Clause",
+  "icon": "assets/serialization-record/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "client": [
+      "com.martmists.serializationRecord.client.SerializationRecordClient"
+    ],
+    "main": [
+      "com.martmists.serializationRecord.SerializationRecord"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-language-kotlin": ">=${kotlin_loader_version}",
+    "minecraft": "${minecraft_version}"
+  }
+}

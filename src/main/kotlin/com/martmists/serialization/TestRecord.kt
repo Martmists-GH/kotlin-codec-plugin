@@ -1,8 +1,10 @@
 package com.martmists.serialization
 
+import com.mojang.authlib.GameProfile
 import com.mojang.datafixers.Products
 import com.mojang.serialization.Codec
 import com.mojang.serialization.codecs.RecordCodecBuilder
+import net.minecraft.util.dynamic.Codecs
 
 // Before plugin:
 
@@ -12,6 +14,10 @@ data class TestData(
     val y: String,
 )
 
+@Record
+data class RelocatedTestData(
+    val profile: @CodecLocation(Codecs::class, "GAME_PROFILE_CODEC") GameProfile,
+)
 
 // After plugin:
 

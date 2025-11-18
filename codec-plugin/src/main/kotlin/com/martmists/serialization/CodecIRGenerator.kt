@@ -12,11 +12,15 @@ import org.jetbrains.kotlin.ir.builders.declarations.addValueParameter
 import org.jetbrains.kotlin.ir.builders.declarations.buildClass
 import org.jetbrains.kotlin.ir.builders.declarations.buildField
 import org.jetbrains.kotlin.ir.declarations.*
+import org.jetbrains.kotlin.ir.expressions.IrClassReference
+import org.jetbrains.kotlin.ir.expressions.IrConst
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.IrStatementOrigin
 import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionExpressionImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionReferenceImpl
+import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionReferenceImplWithShape
 import org.jetbrains.kotlin.ir.expressions.impl.IrPropertyReferenceImpl
+import org.jetbrains.kotlin.ir.get
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.UnsafeDuringIrConstructionAPI
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
@@ -106,6 +110,8 @@ class CodecIRGenerator : IrGenerationExtension {
     }
 
     private fun IrBuilder.getCodec(pluginContext: IrPluginContext, type: IrType): IrExpression {
+        val codecLocationAnnotation = FqName("com.martmists.serialization.CodecLocation")
+
         val codecKlass = pluginContext.referenceClass(
             ClassId(
                 FqName("com.mojang.serialization"),
@@ -128,9 +134,18 @@ class CodecIRGenerator : IrGenerationExtension {
             }
 
             else -> {
-                val typeSymbol = type.classOrNull ?: error("Type has no class: $type")
+                val ann = type.annotations.firstOrNull { it.isAnnotationWithEqualFqName(codecLocationAnnotation) }
+                val (typeSymbol, fieldName) = if (ann == null) {
+                    val klass = type.classOrNull ?: error("Type has no class: $type")
+                    klass to "CODEC"
+                } else {
+                    val klass = ann.arguments[0] as IrClassReference
+                    val name = ann.arguments[1] as IrConst
+                    (klass.symbol as IrClassSymbol) to (name.value as String)
+                }
+
                 val companion = typeSymbol.owner.companionObject()
-                val codecField = (companion ?: typeSymbol.owner).declarations.filterIsInstance<IrProperty>().firstOrNull { it.name.asString() == "CODEC" }?.backingField
+                val codecField = (companion ?: typeSymbol.owner).declarations.filterIsInstance<IrProperty>().firstOrNull { it.name.asString() == fieldName }?.backingField
                 ?: error("Type ${typeSymbol.owner.name} does not have a CODEC property")
 
                 val receiver = if (companion != null) irGetObjectValue(companion.defaultType, companion.symbol) else null
@@ -146,6 +161,80 @@ class CodecIRGenerator : IrGenerationExtension {
             .first { it.name.asString() == fieldName }
             .backingField!!
         return irGetField(null, field)
+    }
+
+    private fun IrPluginContext.buildSamLambdaExpression(
+        startOffset: Int,
+        endOffset: Int,
+        samType: IrType,                          // expected java functional interface type (from call site)
+        parent: IrDeclarationParent,              // where to place the generated IrSimpleFunction
+        bodyBuilder: IrBlockBodyBuilder.(List<IrValueParameter>) -> IrExpression
+    ): IrExpression {
+        // require a simple type class-based SAM
+        val simpleSam = samType as? IrSimpleType
+            ?: error("SAM conversion requires IrSimpleType, got: $samType")
+
+        val samClassSymbol = simpleSam.classifier as? IrClassSymbol
+            ?: error("SAM type classifier is not a class symbol: $samType")
+
+        val samClass = samClassSymbol.owner
+
+        // Find the single abstract method (the SAM). Be tolerant: look for functions that are abstract (Kotlin fun interfaces or Java SAMs).
+        val samMethod = samClass.functions.singleOrNull { it.modality == Modality.ABSTRACT }
+            ?: error("Type $samType is not a valid SAM (no single abstract method)")
+
+        // NOTE: if the SAM interface is generic, the method's parameter and return types may involve type parameters.
+        // For a correct substitution you'd need to map the samType.typeArguments onto samClass.typeParameters and substitute.
+        // In many practical cases (java.util.function.*) the method types are already concrete via samType arguments.
+        // If you must support generic substitution, add a type-substitution step here. For many of your plugin uses it's not necessary.
+
+        // Collect parameter and return types from the SAM method
+        val paramTypes: List<IrType> = samMethod.parameters.filter { it.kind == IrParameterKind.Regular }.map { it.type }
+        val returnType: IrType = samMethod.returnType
+
+        // Create the IR function (the lambda's underlying function)
+        val lambdaFun = this.irFactory.createSimpleFunction(
+            startOffset,
+            endOffset,
+            IrDeclarationOrigin.LOCAL_FUNCTION_FOR_LAMBDA,
+            Name.special("<sam_lambda>"),
+            DescriptorVisibilities.LOCAL,
+            isInline = false,
+            isExpect = false,
+            returnType = returnType,
+            modality = Modality.FINAL,
+            symbol = IrSimpleFunctionSymbolImpl(),
+            isTailrec = false,
+            isSuspend = false,
+            isOperator = false,
+            isInfix = false
+        ).apply {
+            this.parent = parent
+        }
+
+        // Add parameters to the lambda function according to the SAM signature
+        val irParams: List<IrValueParameter> = paramTypes.mapIndexed { index, pType ->
+            lambdaFun.addValueParameter {
+                name = Name.identifier("p$index")
+                type = pType
+            }
+        }
+
+        // Build body using the provided bodyBuilder; it should produce the expression to return
+        lambdaFun.body = IrBlockBuilder(this, Scope(lambdaFun.symbol), startOffset, endOffset)
+            .irBlockBody {
+                val res = bodyBuilder(irParams)
+                +irReturn(res)
+            }
+
+        // Wrap the function in an IrFunctionExpressionImpl with the expected SAM type (so backend can convert it to the functional interface)
+        return IrFunctionExpressionImpl(
+            startOffset,
+            endOffset,
+            samType,
+            lambdaFun,
+            IrStatementOrigin.LAMBDA
+        )
     }
 
     private fun initializeCodecField(
@@ -276,22 +365,13 @@ class CodecIRGenerator : IrGenerationExtension {
                                             val prop = klass.properties.first { it.name == arg.name }
                                             arguments.addAll(1,
                                                 listOf(
-                                                    IrPropertyReferenceImpl(
+                                                    IrFunctionReferenceImpl(
                                                         klass.startOffset,
                                                         klass.endOffset,
-                                                        pluginContext.referenceClass(ClassId(
-                                                            FqName("kotlin.reflect"),
-                                                            Name.identifier(StandardNames.K_PROPERTY_PREFIX+"1")
-                                                        ))!!.typeWith(listOf(klass.defaultType, arg.type)),
-                                                        prop.symbol,
+                                                        forGetter.owner.parameters[1].type,
+                                                        prop.getter!!.symbol,
                                                         0,
-                                                        null,
-                                                        prop.getter?.symbol,
-                                                        null,
-                                                        null
-                                                    ).apply {
-
-                                                    }
+                                                    )
                                                 )
                                             )
                                         }
@@ -308,7 +388,7 @@ class CodecIRGenerator : IrGenerationExtension {
                                         IrFunctionReferenceImpl(
                                             klass.startOffset,
                                             klass.endOffset,
-                                            pluginContext.irBuiltIns.functionN(ctor.nonDispatchParameters.size).typeWith(*ctor.nonDispatchParameters.map { it.type }.toTypedArray(), codecType),
+                                            apply.owner.parameters[2].type,
                                             ctor.symbol,
                                             0,
                                         )

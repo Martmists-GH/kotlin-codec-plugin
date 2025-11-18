@@ -10,11 +10,8 @@
   "icon": "assets/serialization-record/icon.png",
   "environment": "*",
   "entrypoints": {
-    "client": [
-      "com.martmists.serializationRecord.client.SerializationRecordClient"
-    ],
     "main": [
-      "com.martmists.serializationRecord.SerializationRecord"
+      "com.martmists.serialization.SerializationRecord"
     ]
   },
   "depends": {

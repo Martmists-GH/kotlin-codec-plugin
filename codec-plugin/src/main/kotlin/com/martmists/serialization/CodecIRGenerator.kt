@@ -150,12 +150,17 @@ class CodecIRGenerator : IrGenerationExtension {
                 }
 
                 val companion = typeSymbol.owner.companionObject()
-                val codecField = (companion ?: typeSymbol.owner).declarations.filterIsInstance<IrProperty>().firstOrNull { it.name.asString() == fieldName }?.backingField
-                ?: error("Type ${typeSymbol.owner.name} does not have a CODEC property")
 
+                val codecProp = (companion ?: typeSymbol.owner).declarations.filterIsInstance<IrProperty>().firstOrNull { it.name.asString() == fieldName } ?: error("Type ${typeSymbol.owner.name} does not have a CODEC property")
                 val receiver = if (companion != null) irGetObjectValue(companion.defaultType, companion.symbol) else null
 
-                irGetField(receiver, codecField)
+                if (codecProp.getter != null) {
+                    irCall(codecProp.getter!!).apply {
+                        dispatchReceiver = receiver ?: irGetObjectValue(typeSymbol.owner.defaultType, typeSymbol)
+                    }
+                } else {
+                    irGetField(receiver, codecProp.backingField!!)
+                }
             }
         }
     }
@@ -225,7 +230,7 @@ class CodecIRGenerator : IrGenerationExtension {
             it.owner.name.asString() == "group" && it.owner.nonDispatchParameters.size == ctor.parameters.size
         }
         val fieldOf = codecKlass.functions.first { it.owner.name.asString() == "fieldOf" }
-        val optionalFieldOf = codecKlass.functions.first { it.owner.name.asString() == "optionalFieldOf" }
+        val optionalFieldOf = codecKlass.functions.first { it.owner.name.asString() == "optionalFieldOf" && it.owner.nonDispatchParameters.size == 2 }
         val forGetter = mapCodecKlass.functions.first { it.owner.name.asString() == "forGetter" }
         val apply = productKlass.functions.first { it.owner.name.asString() == "apply" }
 
@@ -273,13 +278,14 @@ class CodecIRGenerator : IrGenerationExtension {
                                 arguments.addAll(1,
                                     ctor.nonDispatchParameters.map { arg ->
                                         val codec = getCodec(pluginContext, arg.type)
+                                        val name = (klass.properties.firstOrNull { it.name.asString() == arg.name.asString() }?.getAnnotation(FqName("kotlinx.serialization.SerialName"))?.arguments?.get(0) as IrConst?)?.value as String? ?: arg.name.asString()
 
                                         val field = if (arg.hasDefaultValue()) {
                                             irCall(optionalFieldOf).apply {
                                                 dispatchReceiver = codec
                                                 arguments.addAll(1,
                                                     listOf(
-                                                        irString(arg.name.asString()),
+                                                        irString(name),
                                                         arg.defaultValue!!.expression,
                                                     )
                                                 )
@@ -289,7 +295,7 @@ class CodecIRGenerator : IrGenerationExtension {
                                                 dispatchReceiver = codec
                                                 arguments.addAll(1,
                                                     listOf(
-                                                        irString(arg.name.asString()),
+                                                        irString(name),
                                                     )
                                                 )
                                             }

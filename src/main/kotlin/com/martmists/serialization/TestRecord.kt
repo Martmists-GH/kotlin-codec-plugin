@@ -9,15 +9,10 @@ import kotlin.reflect.KProperty1
 
 // Before plugin:
 
-@Record
+@RecordCodec
 data class TestData(
     val x: Int,
     val y: String,
-)
-
-@Record
-data class RelocatedTestData(
-    val profile: @CodecLocation(Codecs::class, "GAME_PROFILE_CODEC") GameProfile,
 )
 
 // After plugin:
@@ -34,10 +29,5 @@ data class TestDataGenerated(
             )
             prod.apply<TestDataGenerated>(it, ::TestDataGenerated)
         }
-    }
-
-    // Proving it exists:
-    init {
-        val codec: Codec<TestData> = TestData.CODEC
     }
 }

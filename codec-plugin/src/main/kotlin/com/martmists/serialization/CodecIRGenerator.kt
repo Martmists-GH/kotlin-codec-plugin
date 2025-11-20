@@ -5,11 +5,6 @@ import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.descriptors.ClassKind
 import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.descriptors.Modality
-import org.jetbrains.kotlin.diagnostics.AbstractSourceElementPositioningStrategy
-import org.jetbrains.kotlin.diagnostics.KtDiagnosticFactory0
-import org.jetbrains.kotlin.diagnostics.Severity
-import org.jetbrains.kotlin.diagnostics.SourceElementPositioningStrategy
-import org.jetbrains.kotlin.ir.PsiSourceManager.findPsiElement
 import org.jetbrains.kotlin.ir.builders.*
 import org.jetbrains.kotlin.ir.builders.declarations.addConstructor
 import org.jetbrains.kotlin.ir.builders.declarations.addValueParameter
@@ -34,18 +29,23 @@ import org.jetbrains.kotlin.name.Name
 
 @OptIn(UnsafeDuringIrConstructionAPI::class)
 class CodecIRGenerator : IrGenerationExtension {
-    override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
-        val recordAnnotation = FqName("com.martmists.serialization.Record")
+    private val recordAnnotation = FqName("com.martmists.serialization.RecordCodec")
+    private val mapAnnotation = FqName("com.martmists.serialization.MapCodec")
 
-        val recordClasses = mutableListOf<Pair<IrClass, IrClass>>()
+    override fun generate(moduleFragment: IrModuleFragment, pluginContext: IrPluginContext) {
+        val recordClasses = mutableListOf<Triple<IrClass, IrClass, FqName>>()
         moduleFragment.files.forEach { file ->
             file.declarations.filterIsInstance<IrClass>().forEach { klass ->
-                if (!klass.annotations.hasAnnotation(recordAnnotation)) return@forEach
+                val ann = when {
+                    klass.annotations.hasAnnotation(recordAnnotation) -> recordAnnotation
+                    klass.annotations.hasAnnotation(mapAnnotation) -> mapAnnotation
+                    else -> return@forEach
+                }
 
                 if (!klass.isData) {
                     pluginContext.reportError(
                         klass,
-                        "@Record can only be applied to data classes"
+                        "@RecordCodec can only be applied to data classes"
                     )
                     return@forEach
                 }
@@ -55,17 +55,17 @@ class CodecIRGenerator : IrGenerationExtension {
                 if (companion.declarations.any { it is IrField && it.name.asString() == "CODEC" }) {
                     pluginContext.reportError(
                         companion,
-                        "@Record classes should not have a CODEC field"
+                        "@RecordCodec classes should not have a CODEC field"
                     )
                 }
 
                 addEmptyCodecField(companion, pluginContext)
-                recordClasses += klass to companion
+                recordClasses += Triple(klass, companion, ann)
             }
         }
 
-        recordClasses.forEach { (klass, companion) ->
-            initializeCodecField(klass, companion, pluginContext)
+        recordClasses.forEach { (klass, companion, ann) ->
+            initializeCodecField(klass, companion, ann, pluginContext)
         }
     }
 
@@ -114,8 +114,9 @@ class CodecIRGenerator : IrGenerationExtension {
         companion.declarations.add(field)
     }
 
-    private fun IrBuilder.getCodec(pluginContext: IrPluginContext, type: IrType): IrExpression {
+    private fun IrBuilder.getCodec(companion: IrClass, pluginContext: IrPluginContext, type: IrType): IrExpression {
         val codecLocationAnnotation = FqName("com.martmists.serialization.CodecLocation")
+        val lazyCodecAnnotation = FqName("com.martmists.serialization.LazyCodec")
 
         val codecKlass = pluginContext.referenceClass(
             ClassId(
@@ -123,8 +124,9 @@ class CodecIRGenerator : IrGenerationExtension {
                 Name.identifier("Codec"),
             )
         )!!
+        val lazyFunc = codecKlass.functions.first { it.owner.name.asString() == "lazyInitialized" }
 
-        return when {
+        val out = when {
             type == pluginContext.irBuiltIns.intType -> irGetStaticCodec(codecKlass, "INT")
             type == pluginContext.irBuiltIns.floatType -> irGetStaticCodec(codecKlass, "FLOAT")
             type == pluginContext.irBuiltIns.booleanType -> irGetStaticCodec(codecKlass, "BOOLEAN")
@@ -132,9 +134,20 @@ class CodecIRGenerator : IrGenerationExtension {
 
             type.classOrNull == pluginContext.irBuiltIns.listClass -> {
                 val elementType = (type as IrSimpleType).arguments.first().typeOrFail
-                val elementCodec = getCodec(pluginContext, elementType)
+                val elementCodec = getCodec(companion, pluginContext, elementType)
                 irCall(codecKlass.owner.functions.first { it.name.asString() == "list" && it.parameters.size == 1 }).apply {
                     arguments[0] = elementCodec
+                }
+            }
+
+            type.classOrNull == pluginContext.irBuiltIns.mapClass -> {
+                val keyType = (type as IrSimpleType).arguments[0].typeOrFail
+                val valueType = type.arguments[1].typeOrFail
+                val keyCodec = getCodec(companion, pluginContext, keyType)
+                val valueCodec = getCodec(companion, pluginContext, valueType)
+                irCall(codecKlass.owner.functions.first { it.name.asString() == "unboundedMap" }).apply {
+                    arguments[0] = keyCodec
+                    arguments[1] = valueCodec
                 }
             }
 
@@ -163,6 +176,47 @@ class CodecIRGenerator : IrGenerationExtension {
                 }
             }
         }
+
+        if (type.hasAnnotation(lazyCodecAnnotation)) {
+            val lambda = pluginContext.irFactory.createSimpleFunction(
+                companion.startOffset,
+                companion.endOffset,
+                IrDeclarationOrigin.LOCAL_FUNCTION_FOR_LAMBDA,
+                Name.special("<anonymous>"),
+                DescriptorVisibilities.LOCAL,
+                isInline = false,
+                isExpect = false,
+                returnType = out.type,
+                modality = Modality.FINAL,
+                symbol = IrSimpleFunctionSymbolImpl(),
+                isTailrec = false,
+                isSuspend = false,
+                isOperator = false,
+                isInfix = false,
+            ).apply {
+                parent = companion
+
+                body = IrBlockBuilder(pluginContext, Scope(symbol), startOffset, endOffset).irBlockBody {
+                    +irReturn(out)
+                }
+            }
+
+            return irCall(lazyFunc).apply {
+                typeArguments[0] = type
+                arguments[0] = irSamConversion(
+                    IrFunctionExpressionImpl(
+                        companion.startOffset,
+                        companion.endOffset,
+                        pluginContext.irBuiltIns.functionN(0).typeWith(out.type),
+                        lambda,
+                        IrStatementOrigin.LAMBDA
+                    ),
+                    lazyFunc.owner.parameters[0].type
+                )
+            }
+        }
+
+        return out
     }
 
     private fun IrBuilder.irGetStaticCodec(codecKlass: IrClassSymbol, fieldName: String): IrExpression {
@@ -176,10 +230,11 @@ class CodecIRGenerator : IrGenerationExtension {
     private fun initializeCodecField(
         klass: IrClass,
         companion: IrClass,
+        annotation: FqName,
         pluginContext: IrPluginContext,
     ) {
         val ctor = klass.primaryConstructor ?: run {
-            pluginContext.reportError(klass, "@Record requires a primary constructor")
+            pluginContext.reportError(klass, "@RecordCodec requires a primary constructor")
             return
         }
 
@@ -225,7 +280,11 @@ class CodecIRGenerator : IrGenerationExtension {
             )
         )!!
 
-        val create = codecBuilderKlass.functions.first { it.owner.name.asString() == "create" }
+        val create = when (annotation) {
+            recordAnnotation -> codecBuilderKlass.functions.first { it.owner.name.asString() == "create" }
+            mapAnnotation -> codecBuilderKlass.functions.first { it.owner.name.asString() == "mapCodec" }
+            else -> error("Unknown annotation: $annotation")
+        }
         val group = codecBuilderInstanceKlass.functions.first {
             it.owner.name.asString() == "group" && it.owner.nonDispatchParameters.size == ctor.parameters.size
         }
@@ -246,7 +305,7 @@ class CodecIRGenerator : IrGenerationExtension {
                     val lambda = pluginContext.irFactory.createSimpleFunction(
                         klass.startOffset,
                         klass.endOffset,
-                        IrDeclarationOrigin.DEFINED,
+                        IrDeclarationOrigin.LOCAL_FUNCTION_FOR_LAMBDA,
                         Name.special("<anonymous>"),
                         DescriptorVisibilities.LOCAL,
                         isInline = false,
@@ -259,7 +318,6 @@ class CodecIRGenerator : IrGenerationExtension {
                         isOperator = false,
                         isInfix = false,
                     ).apply {
-                        origin = IrDeclarationOrigin.LOCAL_FUNCTION_FOR_LAMBDA
                         parent = companion
 
                         val param = addValueParameter {
@@ -277,7 +335,12 @@ class CodecIRGenerator : IrGenerationExtension {
                                 }
                                 arguments.addAll(1,
                                     ctor.nonDispatchParameters.map { arg ->
-                                        val codec = getCodec(pluginContext, arg.type)
+                                        val codec = try {
+                                            getCodec(companion, pluginContext, arg.type)
+                                        } catch (e: IllegalStateException) {
+                                            pluginContext.reportError(klass, "Failed to map parameter ${arg.name}", e)
+                                            return
+                                        }
                                         val name = (klass.properties.firstOrNull { it.name.asString() == arg.name.asString() }?.getAnnotation(FqName("kotlinx.serialization.SerialName"))?.arguments?.get(0) as IrConst?)?.value as String? ?: arg.name.asString()
 
                                         val field = if (arg.hasDefaultValue()) {
@@ -366,8 +429,8 @@ class CodecIRGenerator : IrGenerationExtension {
         )
     }
 
-    private fun IrPluginContext.reportError(target: IrDeclaration, message: String) {
+    private fun IrPluginContext.reportError(target: IrDeclaration, message: String, cause: Throwable? = null) {
         // TODO: diagnosticReporter.at(target).report(...)
-        throw Exception(message)
+        throw Exception("Error generating codec for ${target.getNameWithAssert()}: $message", cause)
     }
 }

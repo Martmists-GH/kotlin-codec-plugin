@@ -5,7 +5,7 @@ plugins {
     kotlin("jvm") version "2.2.21"
     id("fabric-loom") version "1.13-SNAPSHOT"
     id("maven-publish")
-    id("com.martmists.serialization")
+    id("com.martmists.codecs")
 }
 
 version = project.property("mod_version") as String

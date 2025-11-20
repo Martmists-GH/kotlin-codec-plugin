@@ -1,3 +1,6 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     kotlin("jvm") version "2.2.21"
     kotlin("kapt") version "2.2.21"
@@ -11,13 +14,22 @@ repositories {
     mavenCentral()
 }
 
+kotlin {
+    jvmToolchain(21)
+}
+
+tasks {
+    withType<KotlinCompile> {
+        compilerOptions {
+            jvmTarget = JvmTarget.JVM_21
+        }
+    }
+}
+
 dependencies {
     // Compiler and Gradle APIs
     compileOnly(kotlin("compiler-embeddable", "2.2.21"))
     implementation(kotlin("gradle-plugin-api",  "2.2.21"))
-
-    // Annotation project (for reference in plugin)
-//    implementation(project("codec-annotations"))
 
     // AutoService for registration
     implementation("com.google.auto.service:auto-service:1.1.1")
@@ -27,7 +39,7 @@ dependencies {
 gradlePlugin {
     plugins {
         create("serializationCodecPlugin") {
-            id = "com.martmists.serialization"
+            id = "com.martmists.codecs"
             implementationClass = "com.martmists.serialization.CodecGradlePlugin"
             displayName = "Serialization Codec Plugin"
             description = "Adds CODEC field to classes annotated with @Record"

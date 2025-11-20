@@ -12,7 +12,7 @@ Add the `codec-annotations` and `codec-plugin` folders to your project, then add
 // build.gradle.kts
 plugins {
     ...
-    id("com.martmists.serialization")
+    id("com.martmists.codecs")
 }
 
 dependencies {
@@ -28,14 +28,23 @@ includeBuild("codec-plugin")
 Then in your code:
 
 ```kotlin
-import com.martmists.serialization.Record
+import com.martmists.serialization.RecordCodec
+import com.martmists.serialization.MapCodec
 
-@Record
+@RecordCodec
 data class MyType(
     val x: Int,
     val y: String,
 )
 
+@MapCodec
+data class OtherType(
+    val text: @CodecLocation(TextCodecs::class, "CODEC") Text,
+    @SerialName("some_other_attribute")
+    val someOtherAttribute: String,
+)
+
 // elsewhere
 val codec: Codec<MyType> = MyType.CODEC
+val codec2: MapCodec<OtherType> = OtherType.CODEC
 ```
